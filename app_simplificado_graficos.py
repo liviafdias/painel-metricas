@@ -36,7 +36,7 @@ def carregar_dados_suecia():
 
 # ------------------ Dados base e filtros ------------------
 st.set_page_config(page_title="Painel de Métricas", layout="wide", initial_sidebar_state="expanded")
-st.markdown('<h1 style="text-align:center;">Painel de Métricas Simplificado</h1>', unsafe_allow_html=True)
+st.markdown('<h1 style="text-align:center;">Painel de Métricas</h1>', unsafe_allow_html=True)
 
 # Carregamentos
 try:
@@ -137,6 +137,14 @@ with st.sidebar:
         horizontal=True
     )
 
+    # >>> NOVO CONTROLE: escala para curtidas e comentários
+    escala_y = st.radio(
+        "Escala (curtidas & comentários)",
+        options=["Linear", "Logarítmica"],
+        index=0,
+        horizontal=True
+    )
+
 def filtra_dados():
     df_list = []
     if "BR" in paises and not brasil.empty:
@@ -168,6 +176,20 @@ def filtra_dados():
 
 dados = filtra_dados()
 
+# ------------------ Helpers para eixo log ------------------
+def _calc_log_range(series, max_padronizado):
+    """
+    Para eixo log: garante mínimo >=1, e seta range em expoentes.
+    """
+    # menor positivo nos dados
+    s = pd.to_numeric(series, errors="coerce")
+    min_pos = s[s > 0].min()
+    if pd.isna(min_pos) or min_pos <= 0:
+        min_pos = 1.0
+    y_min = max(1.0, float(min_pos))
+    y_max = max(y_min * 10, float(max_padronizado) if max_padronizado and max_padronizado > 0 else y_min * 10)
+    return np.log10(y_min), np.log10(y_max)
+
 # ------------------ Métricas e Gráficos Principais ------------------
 if dados.empty:
     st.info("Ajuste os filtros na barra lateral para visualizar as métricas.")
@@ -184,7 +206,7 @@ else:
     # Seleciona limites padronizados conforme o agrupamento
     MAX_ATUAL = MAX_PADRONIZADO_Y if agrupamento == "ano" else MAX_PADRONIZADO_M
 
-    # --- Gráfico de Publicações ---
+    # --- Gráfico de Publicações (sempre linear; pedido foi só para curtidas/comentários) ---
     st.subheader("Evolução de Publicações, Curtidas e Comentários")
     df_pub = dados.groupby(['PERIODO', 'MARCA_PAIS']).size().reset_index(name='PUBLICAÇÕES')
     fig_pub = px.line(df_pub, x='PERIODO', y='PUBLICAÇÕES', color='MARCA_PAIS',
@@ -200,27 +222,54 @@ else:
 
     # --- Gráfico de Curtidas ---
     df_curtidas = dados.groupby(['PERIODO', 'MARCA_PAIS'])['CURTIDAS'].sum().reset_index()
-    fig_curtidas = px.bar(df_curtidas, x='PERIODO', y='CURTIDAS', color='MARCA_PAIS',
-                          barmode='group', title=f'Curtidas por {agrupamento}')
-    fig_curtidas.update_layout(
-        xaxis_title='Período', yaxis_title='Quantidade',
-        legend_title='Marca - País', hovermode='x unified',
-        yaxis_range=[0, MAX_ATUAL["curtidas"]],
-        xaxis_range=['2012-01-01', df_curtidas['PERIODO'].max()]
-    )
+
+    if escala_y == "Linear":
+        fig_curtidas = px.bar(df_curtidas, x='PERIODO', y='CURTIDAS', color='MARCA_PAIS',
+                              barmode='group', title=f'Curtidas por {agrupamento}')
+        fig_curtidas.update_layout(
+            xaxis_title='Período', yaxis_title='Quantidade',
+            legend_title='Marca - País', hovermode='x unified',
+            yaxis_range=[0, MAX_ATUAL["curtidas"]],
+            xaxis_range=['2012-01-01', df_curtidas['PERIODO'].max()]
+        )
+    else:
+        fig_curtidas = px.bar(df_curtidas, x='PERIODO', y='CURTIDAS', color='MARCA_PAIS',
+                              barmode='group', title=f'Curtidas por {agrupamento} (escala log)')
+        # definir eixo log e range em expoentes
+        y0, y1 = _calc_log_range(df_curtidas['CURTIDAS'], MAX_ATUAL["curtidas"])
+        fig_curtidas.update_yaxes(type="log", range=[y0, y1])
+        fig_curtidas.update_layout(
+            xaxis_title='Período', yaxis_title='Quantidade (log)',
+            legend_title='Marca - País', hovermode='x unified',
+            xaxis_range=['2012-01-01', df_curtidas['PERIODO'].max()]
+        )
+
     fig_curtidas.update_traces(hovertemplate='<b>%{fullData.name}</b><br>Período: %{x}<br>Curtidas: %{y:,}')
     st.plotly_chart(fig_curtidas, use_container_width=True)
 
     # --- Gráfico de Comentários ---
     df_comentarios = dados.groupby(['PERIODO', 'MARCA_PAIS'])['COMENTARIOS'].sum().reset_index()
-    fig_comentarios = px.bar(df_comentarios, x='PERIODO', y='COMENTARIOS', color='MARCA_PAIS',
-                             barmode='group', title=f'Comentários por {agrupamento}')
-    fig_comentarios.update_layout(
-        xaxis_title='Período', yaxis_title='Quantidade',
-        legend_title='Marca - País', hovermode='x unified',
-        yaxis_range=[0, MAX_ATUAL["comentarios"]],
-        xaxis_range=['2012-01-01', df_comentarios['PERIODO'].max()]
-    )
+
+    if escala_y == "Linear":
+        fig_comentarios = px.bar(df_comentarios, x='PERIODO', y='COMENTARIOS', color='MARCA_PAIS',
+                                 barmode='group', title=f'Comentários por {agrupamento}')
+        fig_comentarios.update_layout(
+            xaxis_title='Período', yaxis_title='Quantidade',
+            legend_title='Marca - País', hovermode='x unified',
+            yaxis_range=[0, MAX_ATUAL["comentarios"]],
+            xaxis_range=['2012-01-01', df_comentarios['PERIODO'].max()]
+        )
+    else:
+        fig_comentarios = px.bar(df_comentarios, x='PERIODO', y='COMENTARIOS', color='MARCA_PAIS',
+                                 barmode='group', title=f'Comentários por {agrupamento} (escala log)')
+        y0c, y1c = _calc_log_range(df_comentarios['COMENTARIOS'], MAX_ATUAL["comentarios"])
+        fig_comentarios.update_yaxes(type="log", range=[y0c, y1c])
+        fig_comentarios.update_layout(
+            xaxis_title='Período', yaxis_title='Quantidade (log)',
+            legend_title='Marca - País', hovermode='x unified',
+            xaxis_range=['2012-01-01', df_comentarios['PERIODO'].max()]
+        )
+
     fig_comentarios.update_traces(hovertemplate='<b>%{fullData.name}</b><br>Período: %{x}<br>Comentários: %{y:,}')
     st.plotly_chart(fig_comentarios, use_container_width=True)
 
