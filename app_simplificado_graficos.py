@@ -1,4 +1,3 @@
-# app_simplificado.py
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -35,43 +34,8 @@ def carregar_dados_suecia():
     df.rename(columns={'N_CURTIDAS_NEW': 'CURTIDAS', 'N_COMENTARIOS_NEW': "COMENTARIOS"}, inplace=True)
     return df
 
-# --- função auxiliar para escolher a periodicidade (mês/ano) ---
-def agrega_periodo(df, col_valores=None):
-    if df.empty:
-        return pd.Series([0])
-    tmp = df.copy()
-    if col_valores:  # curtidas ou comentários
-        tmp[col_valores] = pd.to_numeric(tmp[col_valores], errors="coerce").fillna(0)
-    # aplica filtro mês/ano
-    if agrupamento == "ano":
-        tmp["PERIODO"] = tmp["DT_PUBLICACAO"].dt.to_period("Y").dt.to_timestamp()
-    else:  # default mês
-        tmp["PERIODO"] = tmp["DT_PUBLICACAO"].dt.to_period("M").dt.to_timestamp()
-    # agrupamento
-    if col_valores:
-        return tmp.groupby("PERIODO")[col_valores].sum()
-    else:
-        return tmp.groupby("PERIODO").size()
-
-# máximos globais
-def max_publicacoes_global():
-    s_br = agrega_periodo(brasil)
-    s_se = agrega_periodo(suecia)
-    return max(float(s_br.max() or 0), float(s_se.max() or 0))
-
-def max_curtidas_global():
-    s_br = agrega_periodo(brasil, "CURTIDAS")
-    s_se = agrega_periodo(suecia, "CURTIDAS")
-    return max(float(s_br.max() or 0), float(s_se.max() or 0))
-
-def max_comentarios_global():
-    s_br = agrega_periodo(brasil, "COMENTARIOS")
-    s_se = agrega_periodo(suecia, "COMENTARIOS")
-    return max(float(s_br.max() or 0), float(s_se.max() or 0))
-
 # ------------------ Dados base e filtros ------------------
 st.set_page_config(page_title="Painel de Métricas", layout="wide", initial_sidebar_state="expanded")
-
 st.markdown('<h1 style="text-align:center;">Painel de Métricas Simplificado</h1>', unsafe_allow_html=True)
 
 # Carregamentos
@@ -86,7 +50,51 @@ except Exception as e:
     st.warning(f"Não foi possível carregar dados da Suécia: {e}")
     suecia = pd.DataFrame()
 
-# Sidebar (filtros)
+# ------------------ MÁXIMOS PADRONIZADOS (mensal e anual) ------------------
+def _serie_periodica(df, pais: str, period_code: str, val_col: str | None):
+    """
+    Retorna DataFrame com colunas [PERIODO, MARCA_PAIS, VAL] agregando por MARCA e período.
+    period_code: 'M' (mensal) ou 'Y' (anual)
+    val_col: None -> conta publicações; 'CURTIDAS' ou 'COMENTARIOS' -> soma valores
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["PERIODO", "MARCA_PAIS", "VAL"])
+    t = df.copy()
+    t["PAIS"] = pais
+    if val_col:
+        t[val_col] = pd.to_numeric(t[val_col], errors="coerce").fillna(0)
+    t["PERIODO"] = t["DT_PUBLICACAO"].dt.to_period(period_code).dt.to_timestamp()
+    if val_col:
+        g = t.groupby(["PERIODO", "MARCA", "PAIS"])[val_col].sum().reset_index()
+        g.rename(columns={val_col: "VAL"}, inplace=True)
+    else:
+        g = t.groupby(["PERIODO", "MARCA", "PAIS"]).size().reset_index(name="VAL")
+    g["MARCA_PAIS"] = g["MARCA"] + " - " + g["PAIS"]
+    return g[["PERIODO", "MARCA_PAIS", "VAL"]]
+
+def _max_por_periodo(period_code: str):
+    # Publicações
+    pub_br = _serie_periodica(brasil, "BR", period_code, None)
+    pub_se = _serie_periodica(suecia, "SE", period_code, None)
+    pub_max = float(pd.concat([pub_br, pub_se], ignore_index=True)["VAL"].max() or 0)
+
+    # Curtidas
+    cur_br = _serie_periodica(brasil, "BR", period_code, "CURTIDAS")
+    cur_se = _serie_periodica(suecia, "SE", period_code, "CURTIDAS")
+    curt_max = float(pd.concat([cur_br, cur_se], ignore_index=True)["VAL"].max() or 0)
+
+    # Comentários
+    com_br = _serie_periodica(brasil, "BR", period_code, "COMENTARIOS")
+    com_se = _serie_periodica(suecia, "SE", period_code, "COMENTARIOS")
+    coment_max = float(pd.concat([com_br, com_se], ignore_index=True)["VAL"].max() or 0)
+
+    return {"publicacoes": pub_max, "curtidas": curt_max, "comentarios": coment_max}
+
+# Calcula UMA VEZ os limites padronizados globais
+MAX_PADRONIZADO_M = _max_por_periodo("M")  # máximos por mês
+MAX_PADRONIZADO_Y = _max_por_periodo("Y")  # máximos por ano
+
+# ------------------ Sidebar (filtros) ------------------
 with st.sidebar:
     st.header("Filtros")
 
@@ -149,6 +157,8 @@ def filtra_dados():
     if marcas_selecionadas:
         df = df[df["MARCA"].isin(marcas_selecionadas)]
     df["MARCA_PAIS"] = df["MARCA"] + " - " + df["PAIS"]
+
+    # PERIODO conforme o agrupamento escolhido
     if agrupamento == "ano":
         df['PERIODO'] = df['DT_PUBLICACAO'].dt.to_period("Y").dt.to_timestamp()
     else:
@@ -171,68 +181,47 @@ else:
     colm2.metric("Total de Curtidas", f"{total_curtidas:,}".replace(",", "."))
     colm3.metric("Total de Comentários", f"{total_comentarios:,}".replace(",", "."))
 
-    # --- Gráfico de Publicações ---
-    df_pub = dados.groupby(['PERIODO', 'MARCA_PAIS']).size().reset_index(name='PUBLICAÇÕES')
-    ymax_pub = max_publicacoes_global()
+    # Seleciona limites padronizados conforme o agrupamento
+    MAX_ATUAL = MAX_PADRONIZADO_Y if agrupamento == "ano" else MAX_PADRONIZADO_M
 
-    fig_pub = px.line(
-        df_pub, x='PERIODO', y='PUBLICAÇÕES', color='MARCA_PAIS',
-        title=f'Publicações por {agrupamento}', markers=True
-    )
+    # --- Gráfico de Publicações ---
+    st.subheader("Evolução de Publicações, Curtidas e Comentários")
+    df_pub = dados.groupby(['PERIODO', 'MARCA_PAIS']).size().reset_index(name='PUBLICAÇÕES')
+    fig_pub = px.line(df_pub, x='PERIODO', y='PUBLICAÇÕES', color='MARCA_PAIS',
+                      title=f'Publicações por {agrupamento}', markers=True)
     fig_pub.update_layout(
-        xaxis_title='Período',
-        yaxis_title='Quantidade',
-        legend_title='Marca - País',
-        hovermode='x unified',
-        yaxis_range=[0, ymax_pub],  # <-- agora fixo no máximo global
+        xaxis_title='Período', yaxis_title='Quantidade',
+        legend_title='Marca - País', hovermode='x unified',
+        yaxis_range=[0, MAX_ATUAL["publicacoes"]],
         xaxis_range=['2012-01-01', df_pub['PERIODO'].max()]
     )
-    fig_pub.update_traces(
-        hovertemplate='<b>%{fullData.name}</b><br>Período: %{x}<br>Publicações: %{y:,}'
-    )
+    fig_pub.update_traces(hovertemplate='<b>%{fullData.name}</b><br>Período: %{x}<br>Publicações: %{y:,}')
     st.plotly_chart(fig_pub, use_container_width=True)
 
     # --- Gráfico de Curtidas ---
     df_curtidas = dados.groupby(['PERIODO', 'MARCA_PAIS'])['CURTIDAS'].sum().reset_index()
-    ymax_curt = max_curtidas_global()
-
-    fig_curtidas = px.bar(
-        df_curtidas, x='PERIODO', y='CURTIDAS', color='MARCA_PAIS',
-        barmode='group', title=f'Curtidas por {agrupamento}'
-    )
+    fig_curtidas = px.bar(df_curtidas, x='PERIODO', y='CURTIDAS', color='MARCA_PAIS',
+                          barmode='group', title=f'Curtidas por {agrupamento}')
     fig_curtidas.update_layout(
-        xaxis_title='Período',
-        yaxis_title='Quantidade',
-        legend_title='Marca - País',
-        hovermode='x unified',
-        yaxis_range=[0, ymax_curt],                # <-- agora fixa no máximo global (~509k no seu caso)
+        xaxis_title='Período', yaxis_title='Quantidade',
+        legend_title='Marca - País', hovermode='x unified',
+        yaxis_range=[0, MAX_ATUAL["curtidas"]],
         xaxis_range=['2012-01-01', df_curtidas['PERIODO'].max()]
     )
-    fig_curtidas.update_traces(
-        hovertemplate='<b>%{fullData.name}</b><br>Período: %{x}<br>Curtidas: %{y:,}'
-    )
+    fig_curtidas.update_traces(hovertemplate='<b>%{fullData.name}</b><br>Período: %{x}<br>Curtidas: %{y:,}')
     st.plotly_chart(fig_curtidas, use_container_width=True)
-
 
     # --- Gráfico de Comentários ---
     df_comentarios = dados.groupby(['PERIODO', 'MARCA_PAIS'])['COMENTARIOS'].sum().reset_index()
-    ymax_com = max_comentarios_global()
-
-    fig_comentarios = px.bar(
-        df_comentarios, x='PERIODO', y='COMENTARIOS', color='MARCA_PAIS',
-        barmode='group', title=f'Comentários por {agrupamento}'
-    )
+    fig_comentarios = px.bar(df_comentarios, x='PERIODO', y='COMENTARIOS', color='MARCA_PAIS',
+                             barmode='group', title=f'Comentários por {agrupamento}')
     fig_comentarios.update_layout(
-        xaxis_title='Período',
-        yaxis_title='Quantidade',
-        legend_title='Marca - País',
-        hovermode='x unified',
-        yaxis_range=[0, ymax_com],  # <-- fixo no máximo global
+        xaxis_title='Período', yaxis_title='Quantidade',
+        legend_title='Marca - País', hovermode='x unified',
+        yaxis_range=[0, MAX_ATUAL["comentarios"]],
         xaxis_range=['2012-01-01', df_comentarios['PERIODO'].max()]
     )
-    fig_comentarios.update_traces(
-        hovertemplate='<b>%{fullData.name}</b><br>Período: %{x}<br>Comentários: %{y:,}'
-    )
+    fig_comentarios.update_traces(hovertemplate='<b>%{fullData.name}</b><br>Período: %{x}<br>Comentários: %{y:,}')
     st.plotly_chart(fig_comentarios, use_container_width=True)
 
     # --- Correlação Curtidas × Comentários ---
